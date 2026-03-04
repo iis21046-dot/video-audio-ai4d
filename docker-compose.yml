@@ -1,0 +1,141 @@
+services:
+
+  # ─────────────────────────────────────────────
+  # 🎤 Text-to-Speech  (Coqui XTTS v2)
+  # API:  http://localhost:5002
+  # Docs: http://localhost:5002/docs
+  # ─────────────────────────────────────────────
+  tts:
+    image: ghcr.io/coqui-ai/tts:latest
+    container_name: coqui-tts
+    restart: unless-stopped
+    command: >
+      python3 -m TTS.server.server
+      --model_name tts_models/multilingual/multi-dataset/xtts_v2
+      --port 5002
+      --use_cuda
+    ports:
+      - "5002:5002"
+    volumes:
+      - tts_models:/root/.local/share/tts
+      - tts_output:/tmp/tts_output
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s  # XTTS v2 παίρνει χρόνο να φορτώσει
+
+  # ─────────────────────────────────────────────
+  # 🎬 Text-to-Video  (CogVideoX via FastAPI)
+  # API:  http://localhost:8000
+  # Docs: http://localhost:8000/docs
+  # ─────────────────────────────────────────────
+  video:
+    build:
+      context: ./video-service
+      dockerfile: Dockerfile
+    container_name: cogvideox
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - video_models:/root/.cache/huggingface
+      - video_output:/tmp/video_output
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HF_HOME=/root/.cache/huggingface
+      - MODEL_ID=THUDM/CogVideoX-5b        # ή CogVideoX-2b για γρηγορότερο
+      - NUM_FRAMES=49
+      - GUIDANCE_SCALE=6
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s  # Το μοντέλο κατεβαίνει την πρώτη φορά
+
+  # ─────────────────────────────────────────────
+  # 🖥️  Web UI  (Gradio — TTS + Video μαζί)
+  # UI:  http://localhost:7860
+  # ─────────────────────────────────────────────
+  webui:
+    build:
+      context: ./webui-service
+      dockerfile: Dockerfile
+    container_name: media-webui
+    restart: unless-stopped
+    ports:
+      - "7860:7860"
+    environment:
+      - TTS_API=http://tts:5002
+      - VIDEO_API=http://video:8000
+    depends_on:
+      tts:
+        condition: service_healthy
+      video:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────────
+  # 🌐 Nginx reverse proxy  (optional)
+  # http://localhost  →  routes όλα τα services
+  # ─────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: nginx-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - tts
+      - video
+      - webui
+
+volumes:
+  tts_models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /data/volumes/tts_models
+
+  video_models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /data/volumes/video_models
+
+  tts_output:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /data/volumes/tts_output
+
+  video_output:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /data/volumes/video_output
